@@ -85,4 +85,18 @@ async def remove_channel(user_id):
 async def delete_session(user_id):
     """Delete the session associated with the given user_id from the database."""
     await db.update_one({"_id": user_id}, {"$unset": {"session": ""}})
- 
+
+# Topic batch ID storage helpers
+async def set_topic_msg_ids(user_id, msg_ids):
+    data = await get_data(user_id)
+    if data and data.get("_id"):
+        await db.update_one({"_id": user_id}, {"$set": {"topic_msg_ids": msg_ids}})
+    else:
+        await db.insert_one({"_id": user_id, "topic_msg_ids": msg_ids})
+
+async def get_topic_msg_ids(user_id):
+    data = await get_data(user_id)
+    return data.get("topic_msg_ids", []) if data else []
+
+async def clear_topic_msg_ids(user_id):
+    await db.update_one({"_id": user_id}, {"$unset": {"topic_msg_ids": ""}})
