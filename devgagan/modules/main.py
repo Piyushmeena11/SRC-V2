@@ -332,35 +332,42 @@ async def batch_link(_, message):
 
     if topic_id:
         # Topic batch logic
-        pin_msg = await app.send_message(user_id, f"Fetching topic messages in slots ⚡\nTotal messages to check: {total_to_check}\n\n**Powered by Team SPY**", reply_markup=keyboard)
-        valid_msg_ids = []
         try:
-            chunk_size = 100
-            for i in range(start_msg_id, end_msg_id + 1, chunk_size):
-                if not users_loop.get(user_id):
-                    await pin_msg.edit("🛑 Batch process cancelled during fetching.")
-                    return
-                chunk_ids = list(range(i, min(i + chunk_size, end_msg_id + 1)))
-                try:
-                    msgs = await userbot.get_messages(chat_id, chunk_ids)
-                    for msg in msgs:
-                        if msg and getattr(msg, 'message_thread_id', None) == topic_id:
-                            if msg.media or msg.text:
-                                valid_msg_ids.append(msg.id)
-                    
-                    checked_so_far = min(i + chunk_size - 1, end_msg_id) - start_msg_id + 1
-                    await pin_msg.edit(f"Fetching in slots ⚡\nChecked: {checked_so_far}/{total_to_check}\nFound valid: {len(valid_msg_ids)}\n\n**Powered by Team SPY**", reply_markup=keyboard)
-                    await asyncio.sleep(2)
-                except FloodWait as fw:
-                    await pin_msg.edit(f"Floodwait of {fw.value} seconds during fetching. Sleeping...")
-                    await asyncio.sleep(fw.value + 5)
-                except Exception:
-                    pass
-            
-            await db.set_topic_msg_ids(user_id, valid_msg_ids)
-            await pin_msg.edit(f"✅ Fetching complete!\nTotal valid messages found: {len(valid_msg_ids)}\nStarting processing...\n\n**Powered by Team SPY**", reply_markup=keyboard)
-            saved_msg_ids = await db.get_topic_msg_ids(user_id)
-            
+            cached_msg_ids = await db.get_topic_msg_ids(user_id, chat_id, topic_id)
+            if cached_msg_ids:
+                await app.send_message(user_id, f"✅ Reusing {len(cached_msg_ids)} previously fetched messages for this topic from Cache. Bypassing fetch...")
+                await db.set_topic_msg_ids(user_id, chat_id, topic_id, cached_msg_ids)
+                pin_msg = await app.send_message(user_id, f"Starting topic batch from cache ⚡\nTotal valid: {len(cached_msg_ids)}\n\n**Powered by Team SPY**", reply_markup=keyboard)
+                saved_msg_ids = cached_msg_ids
+            else:
+                pin_msg = await app.send_message(user_id, f"Fetching topic messages in slots ⚡\nTotal messages to check: {total_to_check}\n\n**Powered by Team SPY**", reply_markup=keyboard)
+                valid_msg_ids = []
+                chunk_size = 100
+                for i in range(start_msg_id, end_msg_id + 1, chunk_size):
+                    if not users_loop.get(user_id):
+                        await pin_msg.edit("🛑 Batch process cancelled during fetching.")
+                        return
+                    chunk_ids = list(range(i, min(i + chunk_size, end_msg_id + 1)))
+                    try:
+                        msgs = await userbot.get_messages(chat_id, chunk_ids)
+                        for msg in msgs:
+                            if msg and getattr(msg, 'message_thread_id', None) == topic_id:
+                                if msg.media or msg.text:
+                                    valid_msg_ids.append(msg.id)
+                        
+                        checked_so_far = min(i + chunk_size - 1, end_msg_id) - start_msg_id + 1
+                        await pin_msg.edit(f"Fetching in slots ⚡\nChecked: {checked_so_far}/{total_to_check}\nFound valid: {len(valid_msg_ids)}\n\n**Powered by Team SPY**", reply_markup=keyboard)
+                        await asyncio.sleep(2)
+                    except FloodWait as fw:
+                        await pin_msg.edit(f"Floodwait of {fw.value} seconds during fetching. Sleeping...")
+                        await asyncio.sleep(fw.value + 5)
+                    except Exception:
+                        pass
+                
+                await db.set_topic_msg_ids(user_id, chat_id, topic_id, valid_msg_ids)
+                await pin_msg.edit(f"✅ Fetching complete!\nTotal valid messages found: {len(valid_msg_ids)}\nStarting processing...\n\n**Powered by Team SPY**", reply_markup=keyboard)
+                saved_msg_ids = valid_msg_ids
+                
             for idx, msg_id in enumerate(saved_msg_ids):
                 if not users_loop.get(user_id):
                     await pin_msg.edit("🛑 Batch process cancelled.")
@@ -567,7 +574,7 @@ async def resume_individual_batch(user_id, batch_state):
     try:
         if topic_id:
             pin_msg = await app.send_message(user_id, f"Resuming topic batch ⚡\nProcessed: {processed_count}/{total_to_check}\n\n**Powered by Team SPY**", reply_markup=keyboard)
-            saved_msg_ids = await db.get_topic_msg_ids(user_id)
+            saved_msg_ids = await db.get_topic_msg_ids(user_id, chat_id, topic_id)
             start_index = batch_state.get("current_index", 0)
             
             for idx in range(start_index, len(saved_msg_ids)):
