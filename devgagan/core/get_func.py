@@ -357,6 +357,7 @@ class SmartTelegramBot:
         self.pending_photos: Set[int] = set()
         self.user_rename_prefs: Dict[str, str] = {}
         self.user_caption_prefs: Dict[str, str] = {}
+        self.active_uploads = defaultdict(list)
         
         # Pro userbot reference
         self.pro_client = pro
@@ -718,9 +719,13 @@ class SmartTelegramBot:
                         # Cleanup
                         if file_path:
                             await self.file_ops._cleanup_file(file_path)
+                        current_task = asyncio.current_task()
+                        if current_task in self.active_uploads[sender]:
+                            self.active_uploads[sender].remove(current_task)
                         gc.collect()
 
-            asyncio.create_task(upload_task())
+            task = asyncio.create_task(upload_task())
+            self.active_uploads[sender].append(task)
             slot_released = True
                     
         except Exception as e:
