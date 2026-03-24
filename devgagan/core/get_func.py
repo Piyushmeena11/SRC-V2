@@ -381,6 +381,13 @@ class SmartTelegramBot:
         # Process original caption
         processed = original_caption or ""
         
+        # Remove markdown hyperlinks but keep the visible text and formatting
+        import re
+        processed = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', processed)
+        
+        # Remove raw URLs
+        processed = re.sub(r'https?://[^\s]+', '', processed)
+        
         # Remove delete words
         for word in delete_words:
             processed = processed.replace(word, "")
@@ -653,31 +660,48 @@ class SmartTelegramBot:
                 result = await app.send_photo(target_chat_id, file_path, caption=caption, message_thread_id=topic_id)
                 await result.copy(LOG_GROUP)
                 await edit_msg.delete()
+                if file_path:
+                    await self.file_ops._cleanup_file(file_path)
                 return
             
             # Check file size and handle accordingly
             upload_method = self.db.get_user_data(sender, "upload_method", "Pyrogram")
             
-            if file_size > self.config.SIZE_LIMIT:
-                free_check = 0
-                if 'chk_user' in globals():
-                    free_check = await chk_user(msg.chat.id, sender)
-                
-                if free_check == 1 or not self.pro_client:
-                    # Split file for free users or when pro client unavailable
-                    await edit_msg.delete()
-                    await self.file_ops.split_large_file(file_path, app, sender, target_chat_id, caption, topic_id)
-                    return
-                else:
-                    # Use 4GB uploader
-                    await self.handle_large_file_upload(file_path, sender, edit_msg, caption)
-                    return
-            
-            # Regular upload
-            if upload_method == "Telethon" and gf:
-                await self.upload_with_telethon(file_path, sender, target_chat_id, caption, topic_id, edit_msg)
-            else:
-                await self.upload_with_pyrogram(file_path, sender, target_chat_id, caption, topic_id, edit_msg)
+            async def upload_task():
+                try:
+                    if file_size > self.config.SIZE_LIMIT:
+                        free_check = 0
+                        if 'chk_user' in globals():
+                            free_check = await chk_user(msg.chat.id, sender)
+                        
+                        if free_check == 1 or not self.pro_client:
+                            # Split file for free users or when pro client unavailable
+                            await edit_msg.delete()
+                            await self.file_ops.split_large_file(file_path, app, sender, target_chat_id, caption, topic_id)
+                            return
+                        else:
+                            # Use 4GB uploader
+                            await self.handle_large_file_upload(file_path, sender, edit_msg, caption)
+                            return
+                    
+                    # Regular upload
+                    if upload_method == "Telethon" and gf:
+                        await self.upload_with_telethon(file_path, sender, target_chat_id, caption, topic_id, edit_msg)
+                    else:
+                        await self.upload_with_pyrogram(file_path, sender, target_chat_id, caption, topic_id, edit_msg)
+                except Exception as e:
+                    print(f"Upload error: {e}")
+                    try:
+                        await edit_msg.edit(f"**Error:** {str(e)}")
+                    except:
+                        pass
+                finally:
+                    # Cleanup
+                    if file_path:
+                        await self.file_ops._cleanup_file(file_path)
+                    gc.collect()
+
+            asyncio.create_task(upload_task())
                     
         except Exception as e:
             print(f"Error in _process_message: {e}")
@@ -685,8 +709,6 @@ class SmartTelegramBot:
                 await edit_msg.edit(f"**Error:** {str(e)}")
             except:
                 pass
-        finally:
-            # Cleanup
             if file_path:
                 await self.file_ops._cleanup_file(file_path)
             gc.collect()
