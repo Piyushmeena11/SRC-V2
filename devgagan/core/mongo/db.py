@@ -100,3 +100,30 @@ async def get_topic_msg_ids(user_id):
 
 async def clear_topic_msg_ids(user_id):
     await db.update_one({"_id": user_id}, {"$unset": {"topic_msg_ids": ""}})
+
+# Batch auto-resume helpers
+async def save_batch_state(user_id, state_dict):
+    data = await get_data(user_id)
+    if data and data.get("_id"):
+         await db.update_one({"_id": user_id}, {"$set": {"batch_state": state_dict}})
+    else:
+         await db.insert_one({"_id": user_id, "batch_state": state_dict})
+
+async def get_batch_state(user_id):
+    data = await get_data(user_id)
+    return data.get("batch_state", None) if data else None
+
+async def delete_batch_state(user_id):
+    await db.update_one({"_id": user_id}, {"$unset": {"batch_state": ""}})
+
+async def get_all_active_batches():
+    cursor = db.find({"batch_state": {"$exists": True}})
+    return [doc async for doc in cursor]
+
+async def update_bot_status(status):
+    import time
+    await mongo.user_data.bot_status.update_one({"_id": "status"}, {"$set": {"state": status, "timestamp": time.time()}}, upsert=True)
+
+async def get_bot_status():
+    data = await mongo.user_data.bot_status.find_one({"_id": "status"})
+    return data if data else {"state": "crashed", "timestamp": 0}
