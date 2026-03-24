@@ -42,6 +42,8 @@ if STRING:
 else:
     pro = None
 
+from devgagan.core.upload_manager import upload_manager
+
 # Constants and Configuration
 @dataclass
 class BotConfig:
@@ -619,6 +621,7 @@ class SmartTelegramBot:
     async def _process_message(self, userbot, msg: Message, sender: int, edit_msg: Message):
         """Processes a fetched message object for downloading and uploading."""
         file_path = None
+        slot_released = True # Default true until we wait_for_slot
         try:
             # Get target chat configuration
             target_chat_str = self.db.get_user_data(sender, "target_chat", str(sender))
@@ -637,19 +640,31 @@ class SmartTelegramBot:
                 await edit_msg.delete()
                 return
             
-            filename, file_size, media_type = self.media_processor.get_media_info(msg)
+            filename, raw_file_size, media_type = self.media_processor.get_media_info(msg)
+            file_size = raw_file_size or 0
+            
+            # Pre-emptively pause downloading if storage queue limit is hit
+            await upload_manager.wait_for_slot(file_size)
+            slot_released = False
             
             # Handle direct media types (voice, video_note, sticker)
             if await self._handle_direct_media(msg, target_chat_id, topic_id, edit_msg.id, media_type):
+                await upload_manager.release_slot(file_size)
+                slot_released = True
                 return
             
             # Download file
             await edit_msg.edit("**📥 Downloading...**")
             
-            progress_args = ("╭──────────────╮\n│ **__Downloading...__**\n├────────", edit_msg, time.time())
-            file_path = await userbot.download_media(
-                msg, file_name=filename, progress=progress_bar, progress_args=progress_args
-            )
+            try:
+                progress_args = ("╭──────────────╮\n│ **__Downloading...__**\n├────────", edit_msg, time.time())
+                file_path = await userbot.download_media(
+                    msg, file_name=filename, progress=progress_bar, progress_args=progress_args
+                )
+            except Exception as e:
+                await upload_manager.release_slot(file_size)
+                slot_released = True
+                raise e
             
             # Process caption and filename
             caption = await self.process_user_caption(msg.caption.markdown if msg.caption else "", sender)
@@ -662,46 +677,51 @@ class SmartTelegramBot:
                 await edit_msg.delete()
                 if file_path:
                     await self.file_ops._cleanup_file(file_path)
+                await upload_manager.release_slot(file_size)
+                slot_released = True
                 return
             
             # Check file size and handle accordingly
             upload_method = self.db.get_user_data(sender, "upload_method", "Pyrogram")
             
             async def upload_task():
-                try:
-                    if file_size > self.config.SIZE_LIMIT:
-                        free_check = 0
-                        if 'chk_user' in globals():
-                            free_check = await chk_user(msg.chat.id, sender)
-                        
-                        if free_check == 1 or not self.pro_client:
-                            # Split file for free users or when pro client unavailable
-                            await edit_msg.delete()
-                            await self.file_ops.split_large_file(file_path, app, sender, target_chat_id, caption, topic_id)
-                            return
-                        else:
-                            # Use 4GB uploader
-                            await self.handle_large_file_upload(file_path, sender, edit_msg, caption)
-                            return
-                    
-                    # Regular upload
-                    if upload_method == "Telethon" and gf:
-                        await self.upload_with_telethon(file_path, sender, target_chat_id, caption, topic_id, edit_msg)
-                    else:
-                        await self.upload_with_pyrogram(file_path, sender, target_chat_id, caption, topic_id, edit_msg)
-                except Exception as e:
-                    print(f"Upload error: {e}")
+                async with upload_manager.semaphore:
                     try:
-                        await edit_msg.edit(f"**Error:** {str(e)}")
-                    except:
-                        pass
-                finally:
-                    # Cleanup
-                    if file_path:
-                        await self.file_ops._cleanup_file(file_path)
-                    gc.collect()
+                        if file_size > self.config.SIZE_LIMIT:
+                            free_check = 0
+                            if 'chk_user' in globals():
+                                free_check = await chk_user(msg.chat.id, sender)
+                            
+                            if free_check == 1 or not self.pro_client:
+                                # Split file for free users or when pro client unavailable
+                                await edit_msg.delete()
+                                await self.file_ops.split_large_file(file_path, app, sender, target_chat_id, caption, topic_id)
+                                return
+                            else:
+                                # Use 4GB uploader
+                                await self.handle_large_file_upload(file_path, sender, edit_msg, caption)
+                                return
+                        
+                        # Regular upload
+                        if upload_method == "Telethon" and gf:
+                            await self.upload_with_telethon(file_path, sender, target_chat_id, caption, topic_id, edit_msg)
+                        else:
+                            await self.upload_with_pyrogram(file_path, sender, target_chat_id, caption, topic_id, edit_msg)
+                    except Exception as e:
+                        print(f"Upload error: {e}")
+                        try:
+                            await edit_msg.edit(f"**Error:** {str(e)}")
+                        except:
+                            pass
+                    finally:
+                        await upload_manager.release_slot(file_size)
+                        # Cleanup
+                        if file_path:
+                            await self.file_ops._cleanup_file(file_path)
+                        gc.collect()
 
             asyncio.create_task(upload_task())
+            slot_released = True
                     
         except Exception as e:
             print(f"Error in _process_message: {e}")
@@ -709,6 +729,8 @@ class SmartTelegramBot:
                 await edit_msg.edit(f"**Error:** {str(e)}")
             except:
                 pass
+            if not slot_released and 'file_size' in locals():
+                await upload_manager.release_slot(file_size)
             if file_path:
                 await self.file_ops._cleanup_file(file_path)
             gc.collect()
@@ -902,34 +924,40 @@ class SmartTelegramBot:
                     return
 
                 # Download and upload media
-                final_caption = await self._format_caption_with_custom(msg.caption.markdown if msg.caption else "", sender, custom_caption)
+                filename, raw_file_size, media_type = self.media_processor.get_media_info(msg)
+                file_size = raw_file_size or 0
+                await upload_manager.wait_for_slot(file_size)
                 
-                progress_args = ("Downloading...", edit_msg, time.time())
-                file_path = await userbot.download_media(msg, progress=progress_bar, progress_args=progress_args)
-                file_path = await self.file_ops.process_filename(file_path, sender)
-
-                filename, file_size, media_type = self.media_processor.get_media_info(msg)
-
-                if media_type == "photo":
-                    result = await app_client.send_photo(target_chat_id, file_path, caption=final_caption, message_thread_id=topic_id)
-                elif file_size > self.config.SIZE_LIMIT:
-                    free_check = 0
-                    if 'chk_user' in globals():
-                        free_check = await chk_user(chat_id, sender)
+                try:
+                    final_caption = await self._format_caption_with_custom(msg.caption.markdown if msg.caption else "", sender, custom_caption)
                     
-                    if free_check == 1 or not self.pro_client:
-                        await edit_msg.delete()
-                        await self.file_ops.split_large_file(file_path, app_client, sender, target_chat_id, final_caption, topic_id)
-                        return
-                    else:
-                        await self.handle_large_file_upload(file_path, sender, edit_msg, final_caption)
-                        return
-                else:
-                    upload_method = self.db.get_user_data(sender, "upload_method", "Pyrogram")
-                    if upload_method == "Telethon":
-                        await self.upload_with_telethon(file_path, sender, target_chat_id, final_caption, topic_id, edit_msg)
-                    else:
-                        await self.upload_with_pyrogram(file_path, sender, target_chat_id, final_caption, topic_id, edit_msg)
+                    progress_args = ("Downloading...", edit_msg, time.time())
+                    file_path = await userbot.download_media(msg, progress=progress_bar, progress_args=progress_args)
+                    file_path = await self.file_ops.process_filename(file_path, sender)
+
+                    async with upload_manager.semaphore:
+                        if media_type == "photo":
+                            result = await app_client.send_photo(target_chat_id, file_path, caption=final_caption, message_thread_id=topic_id)
+                        elif file_size > self.config.SIZE_LIMIT:
+                            free_check = 0
+                            if 'chk_user' in globals():
+                                free_check = await chk_user(chat_id, sender)
+                            
+                            if free_check == 1 or not self.pro_client:
+                                await edit_msg.delete()
+                                await self.file_ops.split_large_file(file_path, app_client, sender, target_chat_id, final_caption, topic_id)
+                                return
+                            else:
+                                await self.handle_large_file_upload(file_path, sender, edit_msg, final_caption)
+                                return
+                        else:
+                            upload_method = self.db.get_user_data(sender, "upload_method", "Pyrogram")
+                            if upload_method == "Telethon":
+                                await self.upload_with_telethon(file_path, sender, target_chat_id, final_caption, topic_id, edit_msg)
+                            else:
+                                await self.upload_with_pyrogram(file_path, sender, target_chat_id, final_caption, topic_id, edit_msg)
+                finally:
+                    await upload_manager.release_slot(file_size)
 
         except Exception as e:
             print(f"Public message copy error: {e}")
