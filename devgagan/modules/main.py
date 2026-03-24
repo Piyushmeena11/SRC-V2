@@ -23,6 +23,7 @@ from config import API_ID, API_HASH, FREEMIUM_LIMIT, PREMIUM_LIMIT, OWNER_ID, DE
 from devgagan.core.get_func import get_msg, telegram_bot
 from devgagan.core.func import *
 from devgagan.core.mongo import db
+from devgagan.core.mongo.db import save_batch_state, get_batch_state, delete_batch_state, get_all_active_batches
 from pyrogram.errors import FloodWait
 from datetime import datetime, timedelta
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -311,6 +312,21 @@ async def batch_link(_, message):
     users_loop[user_id] = True
     processed_count = 0
 
+    batch_state = {
+        "start_link": start_link,
+        "start_msg_id": start_msg_id,
+        "end_msg_id": end_msg_id,
+        "chat_id": chat_id,
+        "topic_id": topic_id,
+        "is_private": is_private,
+        "is_topic": bool(topic_id),
+        "total_messages": total_to_check,
+        "current_msg_id": start_msg_id,
+        "processed_count": 0,
+        "current_index": 0
+    }
+    await save_batch_state(user_id, batch_state)
+
     if topic_id:
         # Topic batch logic
         pin_msg = await app.send_message(user_id, f"Fetching topic messages in slots ⚡\nTotal messages to check: {total_to_check}\n\n**Powered by Team SPY**", reply_markup=keyboard)
@@ -342,16 +358,22 @@ async def batch_link(_, message):
             await pin_msg.edit(f"✅ Fetching complete!\nTotal valid messages found: {len(valid_msg_ids)}\nStarting processing...\n\n**Powered by Team SPY**", reply_markup=keyboard)
             saved_msg_ids = await db.get_topic_msg_ids(user_id)
             
-            for msg_id in saved_msg_ids:
+            for idx, msg_id in enumerate(saved_msg_ids):
                 if not users_loop.get(user_id):
                     await pin_msg.edit("🛑 Batch process cancelled.")
                     break
+                
+                batch_state["current_index"] = idx
+                if idx % 5 == 0:
+                    await save_batch_state(user_id, batch_state)
+
                 try:
                     current_msg = await userbot.get_messages(chat_id, msg_id)
                     if current_msg:
                         edit_msg = await app.send_message(user_id, f"Processing message {current_msg.id}...")
                         await telegram_bot._process_message(userbot, current_msg, user_id, edit_msg)
                         processed_count += 1
+                        batch_state["processed_count"] = processed_count
                         sleep_time = 2
                         if processed_count % 50 == 0:
                             sleep_time = 30
@@ -370,6 +392,7 @@ async def batch_link(_, message):
             await set_interval(user_id, interval_minutes=300)
             await pin_msg.edit(f"✅ Topic batch completed!\nProcessed {processed_count} messages.", reply_markup=keyboard)
             await db.clear_topic_msg_ids(user_id)
+            await delete_batch_state(user_id)
         except Exception as e:
             await app.send_message(message.chat.id, f"An error occurred during topic batch processing: {e}")
         finally:
@@ -382,6 +405,10 @@ async def batch_link(_, message):
         try:
             for i in range(start_msg_id, end_msg_id + 1):
                 if user_id in users_loop and users_loop[user_id]:
+                    batch_state["current_msg_id"] = i
+                    if processed_count % 5 == 0:
+                        await save_batch_state(user_id, batch_state)
+
                     try:
                         url = f"{'/'.join(start_link.split('/')[:-1])}/{i}"
                         link = get_link(url)
@@ -389,6 +416,7 @@ async def batch_link(_, message):
                             msg = await app.send_message(message.chat.id, f"Processing...")
                             if await process_and_upload_link(userbot, user_id, msg.id, link, 0, message):
                                 processed_count += 1
+                                batch_state["processed_count"] = processed_count
                                 sleep_time = 2
                                 if processed_count % 50 == 0:
                                     sleep_time = 30
@@ -412,6 +440,7 @@ async def batch_link(_, message):
                 reply_markup=keyboard
             )
             await app.send_message(message.chat.id, "Batch completed successfully! 🎉")
+            await delete_batch_state(user_id)
         except Exception as e:
             await app.send_message(message.chat.id, f"Error: {e}")
         finally:
@@ -424,6 +453,7 @@ async def stop_batch(_, message):
     # Check if there is an active batch process for the user
     if user_id in users_loop and users_loop[user_id]:
         users_loop[user_id] = False  # Set the loop status to False
+        await delete_batch_state(user_id)
         await app.send_message(
             message.chat.id, 
             "Batch processing has been stopped successfully. You can start a new batch now if you want."
@@ -438,3 +468,141 @@ async def stop_batch(_, message):
             message.chat.id, 
             "No active batch processing is running to cancel."
         )
+
+async def resume_all_batches(status):
+    active_batches = await get_all_active_batches()
+    if not active_batches:
+        return
+
+    import time
+    state = status.get("state", "crashed")
+    last_time = status.get("timestamp", 0)
+    current_time = time.time()
+
+    is_valid_resume = False
+    if state == "crashed":
+        is_valid_resume = True # Always resume on crash
+    elif state == "normal" and (current_time - last_time) < 1800: # 30 mins
+        is_valid_resume = True
+    
+    if not is_valid_resume:
+        for batch in active_batches:
+            user_id = batch["_id"]
+            await delete_batch_state(user_id)
+            try:
+                await app.send_message(user_id, "Your pending batch process was cancelled as the bot was intentionally offline for more than 30 minutes.")
+            except:
+                pass
+        return
+
+    # Trigger resumes
+    for batch in active_batches:
+        user_id = batch["_id"]
+        batch_state = batch["batch_state"]
+        asyncio.create_task(resume_individual_batch(user_id, batch_state))
+
+async def resume_individual_batch(user_id, batch_state):
+    start_link = batch_state["start_link"]
+    start_msg_id = batch_state["start_msg_id"]
+    end_msg_id = batch_state["end_msg_id"]
+    chat_id = batch_state["chat_id"]
+    topic_id = batch_state["topic_id"]
+    is_private = batch_state["is_private"]
+    total_to_check = batch_state["total_messages"]
+    processed_count = batch_state.get("processed_count", 0)
+    
+    userbot = await initialize_userbot(user_id)
+    if is_private and not userbot:
+        try:
+            await app.send_message(user_id, "❌ Batch resumed but Userbot not initialized for private channel. Please /login first.")
+        except:
+            pass
+        await delete_batch_state(user_id)
+        return
+        
+    join_button = InlineKeyboardButton("Join Channel", url="https://t.me/team_spy_pro")
+    keyboard = InlineKeyboardMarkup([[join_button]])
+    users_loop[user_id] = True
+
+    try:
+        if topic_id:
+            pin_msg = await app.send_message(user_id, f"Resuming topic batch ⚡\nProcessed: {processed_count}/{total_to_check}\n\n**Powered by Team SPY**", reply_markup=keyboard)
+            saved_msg_ids = await db.get_topic_msg_ids(user_id)
+            start_index = batch_state.get("current_index", 0)
+            
+            for idx in range(start_index, len(saved_msg_ids)):
+                msg_id = saved_msg_ids[idx]
+                if not users_loop.get(user_id):
+                    await pin_msg.edit("🛑 Batch process cancelled.")
+                    break
+                
+                batch_state["current_index"] = idx
+                if idx % 5 == 0:
+                    await save_batch_state(user_id, batch_state)
+
+                try:
+                    current_msg = await userbot.get_messages(chat_id, msg_id)
+                    if current_msg:
+                        edit_msg = await app.send_message(user_id, f"Processing message {current_msg.id}...")
+                        await telegram_bot._process_message(userbot, current_msg, user_id, edit_msg)
+                        processed_count += 1
+                        batch_state["processed_count"] = processed_count
+                        sleep_time = 2
+                        if processed_count % 50 == 0:
+                            sleep_time = 30
+                        elif processed_count % 20 == 0:
+                            sleep_time = 15
+                        elif processed_count % 5 == 0:
+                            sleep_time = 5
+                        await pin_msg.edit(f"Topic batch process running ⚡\nProcessed: {processed_count}/{len(saved_msg_ids)}\nDelay: {sleep_time}s\n\n**Powered by Team SPY**", reply_markup=keyboard)
+                        await asyncio.sleep(sleep_time)
+                except FloodWait as fw:
+                    await pin_msg.edit(f"Floodwait of {fw.value} seconds. Sleeping...")
+                    await asyncio.sleep(fw.value + 5)
+                except Exception:
+                    pass
+            await set_interval(user_id, interval_minutes=300)
+            await pin_msg.edit(f"✅ Topic batch completed!\nProcessed {processed_count} messages.", reply_markup=keyboard)
+            await db.clear_topic_msg_ids(user_id)
+            await delete_batch_state(user_id)
+        else:
+            pin_msg = await app.send_message(user_id, f"Resuming normal batch ⚡\nProcessed: {processed_count}/{total_to_check}\n\n**Powered by Team SPY**", reply_markup=keyboard)
+            await pin_msg.pin(both_sides=True)
+            current_msg_id = batch_state.get("current_msg_id", start_msg_id)
+            
+            for i in range(current_msg_id, end_msg_id + 1):
+                if user_id in users_loop and users_loop[user_id]:
+                    batch_state["current_msg_id"] = i
+                    if processed_count % 5 == 0:
+                        await save_batch_state(user_id, batch_state)
+
+                    try:
+                        url = f"{'/'.join(start_link.split('/')[:-1])}/{i}"
+                        link = get_link(url)
+                        if link:
+                            msg = await app.send_message(user_id, f"Processing...")
+                            if await process_and_upload_link(userbot, user_id, msg.id, link, 0, None):
+                                processed_count += 1
+                                batch_state["processed_count"] = processed_count
+                                sleep_time = 2
+                                if processed_count % 50 == 0:
+                                    sleep_time = 30
+                                elif processed_count % 20 == 0:
+                                    sleep_time = 15
+                                elif processed_count % 5 == 0:
+                                    sleep_time = 5
+                                await pin_msg.edit_text(f"Batch process running ⚡\nProcessed: {processed_count}/{total_to_check}\nDelay: {sleep_time}s\n\n**__Powered by Team SPY__**", reply_markup=keyboard)
+                                await asyncio.sleep(sleep_time)
+                    except Exception:
+                        pass
+                else:
+                    break
+            
+            await set_interval(user_id, interval_minutes=300)
+            await pin_msg.edit_text(f"Batch completed successfully for {processed_count} messages 🎉\n\n**__Powered by Team SPY__**", reply_markup=keyboard)
+            await app.send_message(user_id, "Batch completed successfully! 🎉")
+            await delete_batch_state(user_id)
+    except Exception as e:
+        await app.send_message(user_id, f"Error during batch resume: {e}")
+    finally:
+        users_loop.pop(user_id, None)
