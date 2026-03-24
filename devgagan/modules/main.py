@@ -180,6 +180,9 @@ async def batch_link(_, message):
     if join == 1:
         return
     user_id = message.chat.id
+    from devgagan.core.func import force_stop_flags
+    force_stop_flags[user_id] = False
+    
     # Check if a batch process is already running
     if users_loop.get(user_id, False):
         await app.send_message(
@@ -456,7 +459,7 @@ async def stop_batch(_, message):
         await delete_batch_state(user_id)
         await app.send_message(
             message.chat.id, 
-            "Batch processing has been stopped successfully. You can start a new batch now if you want."
+            "Graceful Cancel initiated. The current file will finish uploading/downloading, and then the batch process will halt safely."
         )
     elif user_id in users_loop and not users_loop[user_id]:
         await app.send_message(
@@ -467,6 +470,40 @@ async def stop_batch(_, message):
         await app.send_message(
             message.chat.id, 
             "No active batch processing is running to cancel."
+        )
+
+@app.on_message(filters.command("stop"))
+async def force_stop_batch(_, message):
+    user_id = message.chat.id
+
+    from devgagan.core.func import force_stop_flags
+    from devgagan.modules.main import telegram_bot
+
+    if user_id in users_loop and users_loop[user_id]:
+        users_loop[user_id] = False  # Stop the loop
+        force_stop_flags[user_id] = True  # Abort Pyrogram tasks
+        
+        # Abort Telethon/Pro tasks
+        if hasattr(telegram_bot, 'active_uploads') and user_id in telegram_bot.active_uploads:
+            for task in telegram_bot.active_uploads[user_id]:
+                if not task.done():
+                    task.cancel()
+            telegram_bot.active_uploads[user_id].clear()
+            
+        await delete_batch_state(user_id)
+        await app.send_message(
+            message.chat.id, 
+            "🛑 Force stopped all active downloads and uploads immediately."
+        )
+    elif user_id in users_loop and not users_loop[user_id]:
+        await app.send_message(
+            message.chat.id, 
+            "The batch process was already stopped. No active batch to stop."
+        )
+    else:
+        await app.send_message(
+            message.chat.id, 
+            "No active batch processing is running to stop."
         )
 
 async def resume_all_batches(status):
@@ -511,6 +548,9 @@ async def resume_individual_batch(user_id, batch_state):
     total_to_check = batch_state["total_messages"]
     processed_count = batch_state.get("processed_count", 0)
     
+    from devgagan.core.func import force_stop_flags
+    force_stop_flags[user_id] = False
+
     userbot = await initialize_userbot(user_id)
     if is_private and not userbot:
         try:
