@@ -42,7 +42,7 @@ async def process_and_upload_link(userbot, user_id, msg_id, link, retry_count, m
         res = await get_msg(userbot, user_id, msg_id, link, retry_count, message)
         if res is False:
             return False
-        await asyncio.sleep(15)
+        await asyncio.sleep(2)
         return True
     except Exception:
         return False
@@ -413,29 +413,64 @@ async def topic_batch(_, message):
         await message.reply(f"Range exceeds limit of {max_batch_size}. Please try a smaller range.")
         return
 
-    pin_msg = await app.send_message(user_id, f"Topic batch process started ⚡\nTotal messages to check: {total_to_check}\n\n**Powered by Team SPY**")
+    pin_msg = await app.send_message(user_id, f"Fetching topic messages in slots ⚡\nTotal messages to check: {total_to_check}\n\n**Powered by Team SPY**")
     users_loop[user_id] = True
     processed_count = 0
+    valid_msg_ids = []
     
     try:
-        for i in range(start_msg_id, end_msg_id + 1):
+        # 1. Fetching in slots of 100
+        chunk_size = 100
+        for i in range(start_msg_id, end_msg_id + 1, chunk_size):
+            if not users_loop.get(user_id):
+                await pin_msg.edit("🛑 Batch process cancelled during fetching.")
+                return
+                
+            chunk_ids = list(range(i, min(i + chunk_size, end_msg_id + 1)))
+            try:
+                msgs = await userbot.get_messages(chat_id, chunk_ids)
+                for msg in msgs:
+                    if msg and getattr(msg, 'message_thread_id', None) == topic_id:
+                        if msg.media or msg.text:
+                            valid_msg_ids.append(msg.id)
+                            
+                await pin_msg.edit(f"Fetching in slots ⚡\nChecked: {min(i + chunk_size - 1, end_msg_id)}/{end_msg_id}\nFound valid: {len(valid_msg_ids)}\n\n**Powered by Team SPY**")
+                await asyncio.sleep(2)
+            except FloodWait as fw:
+                await pin_msg.edit(f"Floodwait of {fw.value} seconds during fetching. Sleeping...")
+                await asyncio.sleep(fw.value + 5)
+            except Exception:
+                pass
+                
+        # 2. Save fetched IDs to DB
+        await db.set_topic_msg_ids(user_id, valid_msg_ids)
+        
+        # 3. Process the fully fetched list
+        await pin_msg.edit(f"✅ Fetching complete!\nTotal valid messages found: {len(valid_msg_ids)}\nStarting processing...\n\n**Powered by Team SPY**")
+        
+        saved_msg_ids = await db.get_topic_msg_ids(user_id)
+        
+        for msg_id in saved_msg_ids:
             if not users_loop.get(user_id):
                 await pin_msg.edit("🛑 Batch process cancelled.")
                 break
             try:
-                current_msg = await userbot.get_messages(chat_id, i)
-                if current_msg and getattr(current_msg, 'message_thread_id', None) == topic_id:
+                current_msg = await userbot.get_messages(chat_id, msg_id)
+                if current_msg:
                     edit_msg = await app.send_message(user_id, f"Processing message {current_msg.id}...")
                     await telegram_bot._process_message(userbot, current_msg, user_id, edit_msg)
                     processed_count += 1
-                    await pin_msg.edit(f"Topic batch process running ⚡\nProcessed: {processed_count}\nChecked: {i - start_msg_id + 1}/{total_to_check}\n\n**Powered by Team SPY**")
-                    await asyncio.sleep(15)
+                    await pin_msg.edit(f"Topic batch process running ⚡\nProcessed: {processed_count}/{len(saved_msg_ids)}\n\n**Powered by Team SPY**")
+                    await asyncio.sleep(2)
             except FloodWait as fw:
                 await pin_msg.edit(f"Floodwait of {fw.value} seconds. Sleeping...")
                 await asyncio.sleep(fw.value + 5)
             except Exception:
                 pass
+                
         await pin_msg.edit(f"✅ Topic batch completed!\nProcessed {processed_count} messages.")
+        await db.clear_topic_msg_ids(user_id)
+        
     except Exception as e:
         await message.reply(f"An error occurred during batch processing: {e}")
     finally:
