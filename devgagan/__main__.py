@@ -35,6 +35,17 @@ async def schedule_expiry_check():
 async def devggn_boot():
     for all_module in ALL_MODULES:
         importlib.import_module("devgagan.modules." + all_module)
+    
+    from devgagan.core.mongo.db import get_bot_status, update_bot_status
+    from devgagan.modules.main import resume_all_batches
+    
+    # Fetch bot status and Auto-Resume batches
+    status = await get_bot_status()
+    asyncio.create_task(resume_all_batches(status))
+    
+    # Update status immediately to "crashed" as default fallback for OOMs
+    await update_bot_status("crashed")
+
     print("""
 ---------------------------------------------------
 📂 Bot Deployed successfully ...
@@ -55,6 +66,9 @@ async def devggn_boot():
     print("Auto removal started ...")
     await idle()
     print("Bot stopped...")
+    
+    # This block executes fully ONLY on graceful shutdown (like Heroku restart/SIGTERM)
+    await update_bot_status("normal")
 
 
 if __name__ == "__main__":
