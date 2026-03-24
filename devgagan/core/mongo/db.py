@@ -87,22 +87,38 @@ async def delete_session(user_id):
     await db.update_one({"_id": user_id}, {"$unset": {"session": ""}})
 
 # Topic batch ID storage helpers
-async def set_topic_msg_ids(user_id, msg_ids):
+async def set_topic_msg_ids(user_id, chat_id, topic_id, msg_ids):
+    import time
     data = await get_data(user_id)
+    cache_item = {
+        "chat_id": chat_id,
+        "topic_id": topic_id,
+        "msg_ids": msg_ids,
+        "timestamp": time.time()
+    }
     if data and data.get("_id"):
-        await db.update_one({"_id": user_id}, {"$set": {"topic_msg_ids": msg_ids}})
+        await db.update_one({"_id": user_id}, {"$set": {"topic_msg_cache": cache_item}})
     else:
-        await db.insert_one({"_id": user_id, "topic_msg_ids": msg_ids})
+        await db.insert_one({"_id": user_id, "topic_msg_cache": cache_item})
 
-async def get_topic_msg_ids(user_id):
+async def get_topic_msg_ids(user_id, chat_id, topic_id):
+    import time
     data = await get_data(user_id)
-    return data.get("topic_msg_ids", []) if data else []
+    cache = data.get("topic_msg_cache", None) if data else None
+    if cache:
+        if cache.get("chat_id") == chat_id and cache.get("topic_id") == topic_id:
+            ts = cache.get("timestamp", 0)
+            if (time.time() - ts) < 72 * 3600:
+                return cache.get("msg_ids", [])
+    return []
 
 async def clear_topic_msg_ids(user_id):
-    await db.update_one({"_id": user_id}, {"$unset": {"topic_msg_ids": ""}})
+    await db.update_one({"_id": user_id}, {"$unset": {"topic_msg_cache": "", "topic_msg_ids": ""}})
 
 # Batch auto-resume helpers
 async def save_batch_state(user_id, state_dict):
+    import time
+    state_dict["timestamp"] = time.time()
     data = await get_data(user_id)
     if data and data.get("_id"):
          await db.update_one({"_id": user_id}, {"$set": {"batch_state": state_dict}})
@@ -127,3 +143,24 @@ async def update_bot_status(status):
 async def get_bot_status():
     data = await mongo.user_data.bot_status.find_one({"_id": "status"})
     return data if data else {"state": "crashed", "timestamp": 0}
+
+async def cleanup_stale_data():
+    """Cleans up batch_state and topic_msg_cache older than 72 hours."""
+    import time
+    cutoff_time = time.time() - (72 * 3600)
+    
+    # Topic msg cache cleanup
+    await db.update_many(
+        {"topic_msg_cache.timestamp": {"$lt": cutoff_time}},
+        {"$unset": {"topic_msg_cache": ""}}
+    )
+    # Batch state cleanup
+    await db.update_many(
+        {"batch_state.timestamp": {"$lt": cutoff_time}},
+        {"$unset": {"batch_state": ""}}
+    )
+    # Clean previous legacy objects as well
+    await db.update_many(
+        {"topic_msg_ids": {"$exists": True}},
+        {"$unset": {"topic_msg_ids": ""}}
+    )
