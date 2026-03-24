@@ -42,7 +42,6 @@ async def process_and_upload_link(userbot, user_id, msg_id, link, retry_count, m
         res = await get_msg(userbot, user_id, msg_id, link, retry_count, message)
         if res is False:
             return False
-        await asyncio.sleep(2)
         return True
     except Exception:
         return False
@@ -184,7 +183,7 @@ async def batch_link(_, message):
     if users_loop.get(user_id, False):
         await app.send_message(
             message.chat.id,
-            "You already have a batch process running. Please wait for it to complete."
+            "You already have a process running. Please wait for it to complete or /cancel it."
         )
         return
 
@@ -193,126 +192,230 @@ async def batch_link(_, message):
         await message.reply("Freemium service is currently not available. Upgrade to premium for access.")
         return
 
-    max_batch_size = FREEMIUM_LIMIT if freecheck == 1 else PREMIUM_LIMIT
-
-    # Start link input
-    for attempt in range(3):
-        start = await app.ask(message.chat.id, "Please send the start link.\n\n> Maximum tries 3")
-        start_id = start.text.strip()
-        s = start_id.split("/")[-1]
-        if s.isdigit():
-            cs = int(s)
-            break
-        await app.send_message(message.chat.id, "Invalid link. Please send again ...")
-    else:
-        await app.send_message(message.chat.id, "Maximum attempts exceeded. Try later.")
-        return
-
-    # End link input
-    for attempt in range(3):
-        end = await app.ask(message.chat.id, "Please send the end link.\n\n> Maximum tries 3")
-        end_id = end.text.strip()
-        e = end_id.split("/")[-1]
-        if e.isdigit():
-            ce = int(e)
-            if ce < cs:
-                await app.send_message(message.chat.id, "End link must be after start link.")
-                continue
-            cl = ce - cs + 1
-            if cl <= max_batch_size:
-                break
-            else:
-                await app.send_message(message.chat.id, f"Range exceeds limit of {max_batch_size}. Please try a smaller range.")
-        else:
-            await app.send_message(message.chat.id, "Invalid link. Please send again ...")
-    else:
-        await app.send_message(message.chat.id, "Maximum attempts exceeded. Try later.")
-        return
+    max_batch_size = (FREEMIUM_LIMIT + 20) if await is_user_verified(user_id) else (FREEMIUM_LIMIT if freecheck == 1 else PREMIUM_LIMIT)
 
     # Validate and interval check
     can_proceed, response_message = await check_interval(user_id, freecheck)
     if not can_proceed:
         await message.reply(response_message)
         return
-        
+
+    # Start link input
+    try:
+        start_link_msg = await app.ask(message.chat.id, "Please send the Start Message Link.\n\n> Maximum tries 3", timeout=60)
+        start_link = start_link_msg.text.strip()
+    except asyncio.TimeoutError:
+        await message.reply("⏰ Timed out. Please try again.")
+        return
+
+    # Determine connection type and chat info
+    chat_id = None
+    start_msg_id = None
+    topic_id = None
+    is_private = False
+
+    if "t.me/c/" in start_link:
+        is_private = True
+        parts = start_link.split("/")
+        try:
+            chat_id_str = parts[parts.index('c') + 1]
+            chat_id = int(f"-100{chat_id_str}")
+            start_msg_id = int(parts[-1])
+        except Exception as e:
+            await message.reply(f"❌ Error parsing start link: {e}")
+            return
+    elif "t.me/b/" in start_link:
+        is_private = True
+        parts = start_link.split("/")
+        try:
+            start_msg_id = int(parts[-1])
+        except Exception as e:
+            await message.reply(f"❌ Error parsing start link: {e}")
+            return
+    else:
+        # Normal public link
+        parts = start_link.split("/")
+        try:
+            start_msg_id = int(parts[-1])
+        except Exception as e:
+            await message.reply(f"❌ Error parsing start link: {e}")
+            return
+
+    userbot = await initialize_userbot(user_id)
+    if is_private and not userbot:
+        await message.reply("❌ Userbot not initialized for private channel. Please /login first.")
+        return
+
+    if is_private and chat_id:
+        # Check if it's a topic
+        try:
+            start_message_obj = await userbot.get_messages(chat_id, start_msg_id)
+            if start_message_obj and getattr(start_message_obj, 'message_thread_id', None):
+                topic_id = start_message_obj.message_thread_id
+        except Exception as e:
+            pass # Maybe not a topic or couldn't fetch
+
+    # End link input
+    try:
+        end_link_msg = await app.ask(message.chat.id, "Please send the End Message Link, or type 'no' to download up to the latest message.", timeout=60)
+        end_text = end_link_msg.text.strip()
+        is_full_topic_download = False
+        end_msg_id = None
+
+        if end_text.lower() == 'no':
+            is_full_topic_download = True
+            if is_private and chat_id and userbot:
+                last_message_list = [msg async for msg in userbot.get_chat_history(chat_id, limit=1)]
+                end_msg_id = last_message_list[0].id if last_message_list else start_msg_id
+            else:
+                if not is_private:
+                    try:
+                        # Find the channel username correctly depending on link format
+                        # Example: https://t.me/channel_name/123
+                        t_me_index = parts.index('t.me')
+                        username = parts[t_me_index + 1]
+                        last_message_list = [msg async for msg in app.get_chat_history(username, limit=1)]
+                        end_msg_id = last_message_list[0].id if last_message_list else start_msg_id
+                    except Exception as e:
+                        await message.reply("Could not fetch the last message of the public channel. Please provide an exact end link.")
+                        return
+                elif is_private and not chat_id:
+                     await message.reply("'no' is not supported for bot links without the complete chat_id. Please provide an exact end link.")
+                     return
+        else:
+            end_link = end_text
+            if is_private and chat_id and (str(chat_id_str) not in end_link):
+                await message.reply("❌ Invalid Link. End link must be from the same chat.")
+                return
+            end_parts = end_link.split("/")
+            try:
+                end_msg_id = int(end_parts[-1])
+            except Exception as e:
+                await message.reply(f"❌ Error parsing end link: {e}")
+                return
+    except asyncio.TimeoutError:
+        await message.reply("⏰ Timed out. Please try again.")
+        return
+
+    if end_msg_id is None or end_msg_id < start_msg_id:
+        await message.reply("End message must be after start message.")
+        return
+
+    total_to_check = end_msg_id - start_msg_id + 1
+    if not is_full_topic_download and total_to_check > max_batch_size:
+        await message.reply(f"Range exceeds limit of {max_batch_size}. Please try a smaller range.")
+        return
+
     join_button = InlineKeyboardButton("Join Channel", url="https://t.me/team_spy_pro")
     keyboard = InlineKeyboardMarkup([[join_button]])
-    pin_msg = await app.send_message(
-        user_id,
-        f"Batch process started ⚡\nProcessing: 0/{cl}\n\n**Powered by Team SPY**",
-        reply_markup=keyboard
-    )
-    await pin_msg.pin(both_sides=True)
-
     users_loop[user_id] = True
     processed_count = 0
-    try:
-        normal_links_handled = False
-        userbot = await initialize_userbot(user_id)
-        # Handle normal links first
-        for i in range(cs, ce + 1):
-            if user_id in users_loop and users_loop[user_id]:
+
+    if topic_id:
+        # Topic batch logic
+        pin_msg = await app.send_message(user_id, f"Fetching topic messages in slots ⚡\nTotal messages to check: {total_to_check}\n\n**Powered by Team SPY**", reply_markup=keyboard)
+        valid_msg_ids = []
+        try:
+            chunk_size = 100
+            for i in range(start_msg_id, end_msg_id + 1, chunk_size):
+                if not users_loop.get(user_id):
+                    await pin_msg.edit("🛑 Batch process cancelled during fetching.")
+                    return
+                chunk_ids = list(range(i, min(i + chunk_size, end_msg_id + 1)))
                 try:
-                    url = f"{'/'.join(start_id.split('/')[:-1])}/{i}"
-                    link = get_link(url)
-                    # Process t.me links (normal) without userbot
-                    if link and 't.me/' in link and not any(x in link for x in ['t.me/b/', 't.me/c/', 'tg://openmessage']):
-                        msg = await app.send_message(message.chat.id, f"Processing...")
-                        if await process_and_upload_link(userbot, user_id, msg.id, link, 0, message):
-                            processed_count += 1
-                            await pin_msg.edit_text(
-                                f"Batch process started ⚡\nProcessing: {processed_count}/{cl}\n\n**__Powered by Team SPY__**",
-                                reply_markup=keyboard
-                            )
-                        normal_links_handled = True
+                    msgs = await userbot.get_messages(chat_id, chunk_ids)
+                    for msg in msgs:
+                        if msg and getattr(msg, 'message_thread_id', None) == topic_id:
+                            if msg.media or msg.text:
+                                valid_msg_ids.append(msg.id)
+                    
+                    checked_so_far = min(i + chunk_size - 1, end_msg_id) - start_msg_id + 1
+                    await pin_msg.edit(f"Fetching in slots ⚡\nChecked: {checked_so_far}/{total_to_check}\nFound valid: {len(valid_msg_ids)}\n\n**Powered by Team SPY**", reply_markup=keyboard)
+                    await asyncio.sleep(2)
+                except FloodWait as fw:
+                    await pin_msg.edit(f"Floodwait of {fw.value} seconds during fetching. Sleeping...")
+                    await asyncio.sleep(fw.value + 5)
                 except Exception:
                     pass
-            else:
-                break
+            
+            await db.set_topic_msg_ids(user_id, valid_msg_ids)
+            await pin_msg.edit(f"✅ Fetching complete!\nTotal valid messages found: {len(valid_msg_ids)}\nStarting processing...\n\n**Powered by Team SPY**", reply_markup=keyboard)
+            saved_msg_ids = await db.get_topic_msg_ids(user_id)
+            
+            for msg_id in saved_msg_ids:
+                if not users_loop.get(user_id):
+                    await pin_msg.edit("🛑 Batch process cancelled.")
+                    break
+                try:
+                    current_msg = await userbot.get_messages(chat_id, msg_id)
+                    if current_msg:
+                        edit_msg = await app.send_message(user_id, f"Processing message {current_msg.id}...")
+                        await telegram_bot._process_message(userbot, current_msg, user_id, edit_msg)
+                        processed_count += 1
+                        sleep_time = 2
+                        if processed_count % 50 == 0:
+                            sleep_time = 30
+                        elif processed_count % 20 == 0:
+                            sleep_time = 15
+                        elif processed_count % 5 == 0:
+                            sleep_time = 5
+                        await pin_msg.edit(f"Topic batch process running ⚡\nProcessed: {processed_count}/{len(saved_msg_ids)}\nDelay: {sleep_time}s\n\n**Powered by Team SPY**", reply_markup=keyboard)
+                        await asyncio.sleep(sleep_time)
+                except FloodWait as fw:
+                    await pin_msg.edit(f"Floodwait of {fw.value} seconds. Sleeping...")
+                    await asyncio.sleep(fw.value + 5)
+                except Exception:
+                    pass
+                    
+            await set_interval(user_id, interval_minutes=300)
+            await pin_msg.edit(f"✅ Topic batch completed!\nProcessed {processed_count} messages.", reply_markup=keyboard)
+            await db.clear_topic_msg_ids(user_id)
+        except Exception as e:
+            await app.send_message(message.chat.id, f"An error occurred during topic batch processing: {e}")
+        finally:
+            users_loop.pop(user_id, None)
 
-        if normal_links_handled:
+    else:
+        # Normal batch logic
+        pin_msg = await app.send_message(user_id, f"Batch process started ⚡\nProcessing: 0/{total_to_check}\n\n**Powered by Team SPY**", reply_markup=keyboard)
+        await pin_msg.pin(both_sides=True)
+        try:
+            for i in range(start_msg_id, end_msg_id + 1):
+                if user_id in users_loop and users_loop[user_id]:
+                    try:
+                        url = f"{'/'.join(start_link.split('/')[:-1])}/{i}"
+                        link = get_link(url)
+                        if link:
+                            msg = await app.send_message(message.chat.id, f"Processing...")
+                            if await process_and_upload_link(userbot, user_id, msg.id, link, 0, message):
+                                processed_count += 1
+                                sleep_time = 2
+                                if processed_count % 50 == 0:
+                                    sleep_time = 30
+                                elif processed_count % 20 == 0:
+                                    sleep_time = 15
+                                elif processed_count % 5 == 0:
+                                    sleep_time = 5
+                                await pin_msg.edit_text(
+                                    f"Batch process started ⚡\nProcessing: {processed_count}/{total_to_check}\nDelay: {sleep_time}s\n\n**__Powered by Team SPY__**",
+                                    reply_markup=keyboard
+                                )
+                                await asyncio.sleep(sleep_time)
+                    except Exception:
+                        pass
+                else:
+                    break
+
             await set_interval(user_id, interval_minutes=300)
             await pin_msg.edit_text(
                 f"Batch completed successfully for {processed_count} messages 🎉\n\n**__Powered by Team SPY__**",
                 reply_markup=keyboard
             )
             await app.send_message(message.chat.id, "Batch completed successfully! 🎉")
-            return
-            
-        # Handle special links with userbot
-        for i in range(cs, ce + 1):
-            if not userbot:
-                await app.send_message(message.chat.id, "Login in bot first ...")
-                users_loop[user_id] = False
-                return
-            if user_id in users_loop and users_loop[user_id]:
-                try:
-                    url = f"{'/'.join(start_id.split('/')[:-1])}/{i}"
-                    link = get_link(url)
-                    if link and any(x in link for x in ['t.me/b/', 't.me/c/']):
-                        msg = await app.send_message(message.chat.id, f"Processing...")
-                        if await process_and_upload_link(userbot, user_id, msg.id, link, 0, message):
-                            processed_count += 1
-                            await pin_msg.edit_text(
-                                f"Batch process started ⚡\nProcessing: {processed_count}/{cl}\n\n**__Powered by Team SPY__**",
-                                reply_markup=keyboard
-                            )
-                except Exception:
-                    pass
-            else:
-                break
-
-        await set_interval(user_id, interval_minutes=300)
-        await pin_msg.edit_text(
-            f"Batch completed successfully for {processed_count} messages 🎉\n\n**__Powered by Team SPY__**",
-            reply_markup=keyboard
-        )
-        await app.send_message(message.chat.id, "Batch completed successfully! 🎉")
-
-    except Exception as e:
-        await app.send_message(message.chat.id, f"Error: {e}")
-    finally:
-        users_loop.pop(user_id, None)
+        except Exception as e:
+            await app.send_message(message.chat.id, f"Error: {e}")
+        finally:
+            users_loop.pop(user_id, None)
 
 @app.on_message(filters.command("cancel"))
 async def stop_batch(_, message):
@@ -335,143 +438,3 @@ async def stop_batch(_, message):
             message.chat.id, 
             "No active batch processing is running to cancel."
         )
-
-@app.on_message(filters.command("topic") & filters.private)
-async def topic_batch(_, message):
-    join = await subscribe(_, message)
-    if join == 1:
-        return
-    user_id = message.chat.id
-    if users_loop.get(user_id, False):
-        await app.send_message(user_id, "You already have a process running. Please wait or /cancel.")
-        return
-
-    freecheck = await chk_user(message, user_id)
-    if freecheck == 1 and FREEMIUM_LIMIT == 0 and user_id not in OWNER_ID and not await is_user_verified(user_id):
-        await message.reply("Freemium service is currently not available. Upgrade to premium for access.")
-        return
-
-    max_batch_size = (FREEMIUM_LIMIT + 20) if await is_user_verified(user_id) else (FREEMIUM_LIMIT if freecheck == 1 else PREMIUM_LIMIT)
-
-    try:
-        start_link_msg = await app.ask(message.chat.id, "Please send the Start Message Link from the topic.", timeout=60)
-        start_link = start_link_msg.text.strip()
-        if "/c/" not in start_link:
-            await start_link_msg.reply("❌ Invalid Link. Please send a valid message link from a private channel/supergroup topic.")
-            return
-    except asyncio.TimeoutError:
-        await message.reply("⏰ Timed out. Please try again.")
-        return
-
-    try:
-        parts = start_link.split("/")
-        chat_id_str = parts[parts.index('c') + 1]
-        chat_id = int(f"-100{chat_id_str}")
-        start_msg_id = int(parts[-1])
-        
-        userbot = await initialize_userbot(user_id)
-        if not userbot:
-            await message.reply("❌ Userbot not initialized. Please /login first.")
-            return
-            
-        start_message_obj = await userbot.get_messages(chat_id, start_msg_id)
-        if not start_message_obj or not getattr(start_message_obj, 'message_thread_id', None):
-            await message.reply("❌ This message is not part of a topic or I can't access it.")
-            return
-        topic_id = start_message_obj.message_thread_id
-    except Exception as e:
-        await message.reply(f"❌ Error parsing start link: {e}")
-        return
-
-    try:
-        is_full_topic_download = False
-        end_link_msg = await app.ask(message.chat.id, "Please send the End Message Link, or type 'no' to download the rest of the topic.", timeout=60)
-        if end_link_msg.text.strip().lower() == 'no':
-            is_full_topic_download = True
-            last_message_list = [msg async for msg in userbot.get_chat_history(chat_id, limit=1)]
-            end_msg_id = last_message_list[0].id if last_message_list else start_msg_id
-        else:
-            end_link = end_link_msg.text.strip()
-            if "/c/" not in end_link or str(chat_id_str) not in end_link:
-                await end_link_msg.reply("❌ Invalid Link. End link must be from the same chat.")
-                return
-            end_parts = end_link.split("/")
-            end_msg_id = int(end_parts[-1])
-    except asyncio.TimeoutError:
-        await message.reply("⏰ Timed out. Please try again.")
-        return
-    except Exception as e:
-        await message.reply(f"❌ Error parsing end link: {e}")
-        return
-
-    if end_msg_id < start_msg_id:
-        await message.reply("End message must be after start message.")
-        return
-
-    total_to_check = end_msg_id - start_msg_id + 1
-    if not is_full_topic_download and total_to_check > max_batch_size:
-        await message.reply(f"Range exceeds limit of {max_batch_size}. Please try a smaller range.")
-        return
-
-    pin_msg = await app.send_message(user_id, f"Fetching topic messages in slots ⚡\nTotal messages to check: {total_to_check}\n\n**Powered by Team SPY**")
-    users_loop[user_id] = True
-    processed_count = 0
-    valid_msg_ids = []
-    
-    try:
-        # 1. Fetching in slots of 100
-        chunk_size = 100
-        for i in range(start_msg_id, end_msg_id + 1, chunk_size):
-            if not users_loop.get(user_id):
-                await pin_msg.edit("🛑 Batch process cancelled during fetching.")
-                return
-                
-            chunk_ids = list(range(i, min(i + chunk_size, end_msg_id + 1)))
-            try:
-                msgs = await userbot.get_messages(chat_id, chunk_ids)
-                for msg in msgs:
-                    if msg and getattr(msg, 'message_thread_id', None) == topic_id:
-                        if msg.media or msg.text:
-                            valid_msg_ids.append(msg.id)
-                            
-                await pin_msg.edit(f"Fetching in slots ⚡\nChecked: {min(i + chunk_size - 1, end_msg_id)}/{end_msg_id}\nFound valid: {len(valid_msg_ids)}\n\n**Powered by Team SPY**")
-                await asyncio.sleep(2)
-            except FloodWait as fw:
-                await pin_msg.edit(f"Floodwait of {fw.value} seconds during fetching. Sleeping...")
-                await asyncio.sleep(fw.value + 5)
-            except Exception:
-                pass
-                
-        # 2. Save fetched IDs to DB
-        await db.set_topic_msg_ids(user_id, valid_msg_ids)
-        
-        # 3. Process the fully fetched list
-        await pin_msg.edit(f"✅ Fetching complete!\nTotal valid messages found: {len(valid_msg_ids)}\nStarting processing...\n\n**Powered by Team SPY**")
-        
-        saved_msg_ids = await db.get_topic_msg_ids(user_id)
-        
-        for msg_id in saved_msg_ids:
-            if not users_loop.get(user_id):
-                await pin_msg.edit("🛑 Batch process cancelled.")
-                break
-            try:
-                current_msg = await userbot.get_messages(chat_id, msg_id)
-                if current_msg:
-                    edit_msg = await app.send_message(user_id, f"Processing message {current_msg.id}...")
-                    await telegram_bot._process_message(userbot, current_msg, user_id, edit_msg)
-                    processed_count += 1
-                    await pin_msg.edit(f"Topic batch process running ⚡\nProcessed: {processed_count}/{len(saved_msg_ids)}\n\n**Powered by Team SPY**")
-                    await asyncio.sleep(2)
-            except FloodWait as fw:
-                await pin_msg.edit(f"Floodwait of {fw.value} seconds. Sleeping...")
-                await asyncio.sleep(fw.value + 5)
-            except Exception:
-                pass
-                
-        await pin_msg.edit(f"✅ Topic batch completed!\nProcessed {processed_count} messages.")
-        await db.clear_topic_msg_ids(user_id)
-        
-    except Exception as e:
-        await message.reply(f"An error occurred during batch processing: {e}")
-    finally:
-        users_loop[user_id] = False
