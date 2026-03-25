@@ -12,6 +12,14 @@
 # License: MIT License
 # ---------------------------------------------------
 
+import sys
+if sys.platform != "win32":
+    try:
+        import uvloop
+        uvloop.install()
+    except ImportError:
+        pass
+
 import asyncio
 import importlib
 import gc
