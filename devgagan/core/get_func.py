@@ -657,15 +657,48 @@ class SmartTelegramBot:
             # Download file
             await edit_msg.edit("**📥 Downloading...**")
             
-            try:
-                progress_args = ("╭──────────────╮\n│ **__Downloading...__**\n├────────", edit_msg, time.time())
-                file_path = await userbot.download_media(
-                    msg, file_name=filename, progress=progress_bar, progress_args=progress_args
-                )
-            except Exception as e:
-                await upload_manager.release_slot(file_size)
-                slot_released = True
-                raise e
+            file_path = None
+            max_retries = 3
+            error_msg = ""
+            
+            for attempt in range(max_retries):
+                try:
+                    progress_args = ("╭──────────────╮\n│ **__Downloading...__**\n├────────", edit_msg, time.time())
+                    file_path = await userbot.download_media(
+                        msg, file_name=filename, progress=progress_bar, progress_args=progress_args
+                    )
+                    
+                    if file_path and os.path.exists(file_path):
+                        down_size = os.path.getsize(file_path)
+                        if file_size > 0 and down_size != file_size:
+                            raise ValueError(f"Integrity check failed: Expected {file_size} bytes, got {down_size} bytes.")
+                        break  # Success
+                    else:
+                        raise FileNotFoundError("File not downloaded successfully.")
+                        
+                except Exception as e:
+                    error_msg = str(e)
+                    if "Force stop" in error_msg:
+                        await upload_manager.release_slot(file_size)
+                        slot_released = True
+                        raise e
+                        
+                    if file_path and os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                        except:
+                            pass
+                    
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(5)
+                        try:
+                            await edit_msg.edit(f"**⚠️ Download Failed (Attempt {attempt+1}/{max_retries}). Retrying in 5s...**")
+                        except:
+                            pass
+                    else:
+                        await upload_manager.release_slot(file_size)
+                        slot_released = True
+                        raise Exception(f"Failed to download after {max_retries} attempts. Last error: {error_msg}")
             
             # Process caption and filename
             caption = await self.process_user_caption(msg.caption.markdown if msg.caption else "", sender)
@@ -942,8 +975,33 @@ class SmartTelegramBot:
                 try:
                     final_caption = await self._format_caption_with_custom(msg.caption.markdown if msg.caption else "", sender, custom_caption)
                     
-                    progress_args = ("Downloading...", edit_msg, time.time())
-                    file_path = await userbot.download_media(msg, progress=progress_bar, progress_args=progress_args)
+                    file_path = None
+                    max_retries = 3
+                    error_msg = ""
+                    for attempt in range(max_retries):
+                        try:
+                            progress_args = ("Downloading...", edit_msg, time.time())
+                            file_path = await userbot.download_media(msg, progress=progress_bar, progress_args=progress_args)
+                            if file_path and os.path.exists(file_path):
+                                down_size = os.path.getsize(file_path)
+                                if file_size > 0 and down_size != file_size:
+                                    raise ValueError(f"Integrity check failed: Expected {file_size} bytes, got {down_size} bytes")
+                                break
+                            else:
+                                raise FileNotFoundError("File not downloaded successfully")
+                        except Exception as e:
+                            error_msg = str(e)
+                            if "Force stop" in error_msg:
+                                raise e
+                            if file_path and os.path.exists(file_path):
+                                try: os.remove(file_path)
+                                except: pass
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(5)
+                                try: await edit_msg.edit(f"**⚠️ Download Failed (Attempt {attempt+1}/{max_retries}). Retrying...**")
+                                except: pass
+                            else:
+                                raise Exception(f"Failed to download after {max_retries} attempts: {error_msg}")
                     file_path = await self.file_ops.process_filename(file_path, sender)
 
                     async with upload_manager.semaphore:
