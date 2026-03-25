@@ -83,11 +83,19 @@ async def devggn_boot():
     
     try:
         from devgagan import app, userrbot, pro, sex, telethon_client
+        from devgagan.modules.main import USERBOT_CACHE
+        
         if app and getattr(app, 'is_connected', False): await app.stop()
         if userrbot and getattr(userrbot, 'is_connected', False): await userrbot.stop()
         if pro and getattr(pro, 'is_connected', False): await pro.stop()
         if sex and getattr(sex, 'is_connected', lambda: False)(): await sex.disconnect()
         if telethon_client and getattr(telethon_client, 'is_connected', lambda: False)(): await telethon_client.disconnect()
+        
+        for user_id, client in USERBOT_CACHE.items():
+            if getattr(client, 'is_connected', False):
+                try: await client.stop()
+                except: pass
+                
     except Exception as e:
         print(f"Error during shutdown: {e}")
 
