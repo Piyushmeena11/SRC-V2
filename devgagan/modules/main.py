@@ -366,7 +366,7 @@ async def batch_link(_, message):
                     
                 try:
                     current_msg = await userbot.get_messages(chat_id, i)
-                    if current_msg and not current_msg.empty and not current_msg.service and getattr(current_msg, 'message_thread_id', None) == topic_id:
+                    if current_msg and not current_msg.empty and not current_msg.service:
                         if current_msg.media or current_msg.text:
                             edit_msg = await app.send_message(user_id, f"Processing message {current_msg.id}...")
                             await telegram_bot._process_message(userbot, current_msg, user_id, edit_msg)
