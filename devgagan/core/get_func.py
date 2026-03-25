@@ -649,13 +649,19 @@ class SmartTelegramBot:
             slot_released = False
             
             # Handle direct media types (voice, video_note, sticker)
-            if await self._handle_direct_media(msg, target_chat_id, topic_id, edit_msg.id, media_type):
+            if await self._handle_direct_media(msg, target_chat_id, topic_id, edit_msg.id, media_type, sender):
                 await upload_manager.release_slot(file_size)
                 slot_released = True
                 return
             
             # Download file
-            await edit_msg.edit("**📥 Downloading...**")
+            try:
+                await edit_msg.edit("**📥 Downloading...**")
+            except FloodWait as fw:
+                await asyncio.sleep(fw.value)
+                await edit_msg.edit("**📥 Downloading...**")
+            except:
+                pass
             
             file_path = None
             max_retries = 3
@@ -865,7 +871,7 @@ class SmartTelegramBot:
             
         return False
 
-    async def _handle_direct_media(self, msg, target_chat_id: int, topic_id: Optional[int], edit_id: int, media_type: str) -> bool:
+    async def _handle_direct_media(self, msg, target_chat_id: int, topic_id: Optional[int], edit_id: int, media_type: str, sender: int = None) -> bool:
         """Handle media that can be sent directly without downloading"""
         result = None
         
@@ -879,7 +885,8 @@ class SmartTelegramBot:
             
             if result:
                 await result.copy(LOG_GROUP)
-                await app.delete_messages(msg.chat.id, edit_id)
+                if sender:
+                    await app.delete_messages(sender, edit_id)
                 return True
                 
         except Exception as e:
