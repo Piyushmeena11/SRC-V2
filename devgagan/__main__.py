@@ -83,6 +83,21 @@ async def devggn_boot():
 
 
 if __name__ == "__main__":
-    loop.run_until_complete(devggn_boot())
+    try:
+        loop.run_until_complete(devggn_boot())
+    except KeyboardInterrupt:
+        pass
+    except Exception as err:
+        print(f"Bot error: {err}")
+    finally:
+        try:
+            # Safely cancel all pending tasks to prevent uvloop RuntimeError / Status 1 crash
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except:
+            pass
 
 # ------------------------------------------------------------------ #
