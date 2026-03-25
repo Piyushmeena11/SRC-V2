@@ -24,6 +24,7 @@ from datetime import datetime as dt
 import asyncio, subprocess, re, os, time
 
 force_stop_flags = {}
+failed_messages_cache = {}
 
 async def chk_user(message, user_id):
     user = await premium_users()
