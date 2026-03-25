@@ -130,22 +130,41 @@ async def single_link(_, message):
             pass
 
 
-async def initialize_userbot(user_id): # this ensure the single startup .. even if logged in or not
+USERBOT_CACHE = {}
+
+async def initialize_userbot(user_id):
     data = await db.get_data(user_id)
     if data and data.get("session"):
+        session_string = data.get("session")
+        if user_id in USERBOT_CACHE:
+            client = USERBOT_CACHE[user_id]
+            if getattr(client, "sc_session_string", "") == session_string and client.is_connected:
+                return client
+            else:
+                try:
+                    await client.stop()
+                except Exception:
+                    pass
+                USERBOT_CACHE.pop(user_id, None)
+
         try:
-            device = 'iPhone 16 Pro' # added gareebi text
+            device = 'iPhone 16 Pro'
             userbot = Client(
                 "userbot",
                 api_id=API_ID,
                 api_hash=API_HASH,
                 device_model=device,
-                session_string=data.get("session")
+                session_string=session_string
             )
             await userbot.start()
+            userbot.sc_session_string = session_string
+            USERBOT_CACHE[user_id] = userbot
             return userbot
         except Exception:
-            await app.send_message(user_id, "Login Expired re do login")
+            try:
+                await app.send_message(user_id, "Login Expired re do login")
+            except:
+                pass
             return None
     else:
         if DEFAULT_SESSION:
@@ -180,8 +199,9 @@ async def batch_link(_, message):
     if join == 1:
         return
     user_id = message.chat.id
-    from devgagan.core.func import force_stop_flags
+    from devgagan.core.func import force_stop_flags, failed_messages_cache
     force_stop_flags[user_id] = False
+    failed_messages_cache[user_id] = []
     
     # Check if a batch process is already running
     if users_loop.get(user_id, False):
@@ -399,10 +419,28 @@ async def batch_link(_, message):
                 except Exception:
                     pass
                     
+            from devgagan.modules.main import telegram_bot
+            from devgagan.core.func import failed_messages_cache
+            
+            while hasattr(telegram_bot, 'active_uploads') and telegram_bot.active_uploads.get(user_id):
+                if not users_loop.get(user_id):
+                    break
+                await asyncio.sleep(2)
+                
             await set_interval(user_id, interval_minutes=300)
             await pin_msg.edit(f"✅ Topic batch completed!\nProcessed {processed_count} messages.", reply_markup=keyboard)
             await db.clear_topic_msg_ids(user_id)
             await delete_batch_state(user_id)
+            
+            failed_msgs = failed_messages_cache.get(user_id, [])
+            if failed_msgs:
+                import io
+                fail_msg = "The following message IDs failed to process:\n" + "\n".join(str(m) for m in failed_msgs)
+                file = io.BytesIO(fail_msg.encode('utf-8'))
+                file.name = "failed_report.txt"
+                await app.send_document(user_id, file, caption="📑 **Failed Messages Report**")
+                failed_messages_cache.pop(user_id, None)
+
         except Exception as e:
             await app.send_message(message.chat.id, f"An error occurred during topic batch processing: {e}")
         finally:
@@ -439,10 +477,24 @@ async def batch_link(_, message):
                                     reply_markup=keyboard
                                 )
                                 await asyncio.sleep(sleep_time)
+                            else:
+                                failed_messages_cache[user_id].append(link)
+                                try:
+                                    await msg.delete()
+                                except:
+                                    pass
                     except Exception:
                         pass
                 else:
                     break
+
+            from devgagan.modules.main import telegram_bot
+            from devgagan.core.func import failed_messages_cache
+            
+            while hasattr(telegram_bot, 'active_uploads') and telegram_bot.active_uploads.get(user_id):
+                if not users_loop.get(user_id):
+                    break
+                await asyncio.sleep(2)
 
             await set_interval(user_id, interval_minutes=300)
             await pin_msg.edit_text(
@@ -451,6 +503,16 @@ async def batch_link(_, message):
             )
             await app.send_message(message.chat.id, "Batch completed successfully! 🎉")
             await delete_batch_state(user_id)
+            
+            failed_msgs = failed_messages_cache.get(user_id, [])
+            if failed_msgs:
+                import io
+                fail_msg = "The following links failed to process:\n" + "\n".join(str(m) for m in failed_msgs)
+                file = io.BytesIO(fail_msg.encode('utf-8'))
+                file.name = "failed_report.txt"
+                await app.send_document(user_id, file, caption="📑 **Failed Links Report**")
+                failed_messages_cache.pop(user_id, None)
+
         except Exception as e:
             await app.send_message(message.chat.id, f"Error: {e}")
         finally:
