@@ -682,6 +682,20 @@ class SmartTelegramBot:
                     else:
                         raise FileNotFoundError("File not downloaded successfully.")
                         
+                except FloodWait as fw:
+                    error_msg = f"FloodWait {fw.value}s"
+                    try:
+                        await edit_msg.edit(f"**⏳ Telegram rate limit. Waiting {fw.value}s...**")
+                    except:
+                        pass
+                    await asyncio.sleep(fw.value)
+                    # FloodWait doesn't count as an attempt
+                    if attempt < max_retries - 1:
+                        continue
+                    else:
+                        await upload_manager.release_slot(file_size)
+                        slot_released = True
+                        raise Exception(f"Failed after {max_retries} attempts due to FloodWait.")
                 except Exception as e:
                     error_msg = str(e)
                     if "Force stop" in error_msg:
