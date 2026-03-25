@@ -101,13 +101,16 @@ if __name__ == "__main__":
         print(f"Bot error: {err}")
     finally:
         try:
-            # Safely cancel all pending tasks to prevent uvloop RuntimeError / Status 1 crash
-            pending = asyncio.all_tasks(loop)
+            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
             for task in pending:
                 task.cancel()
             if pending:
                 loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-        except:
-            pass
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception as e:
+            print(f"Task cleanup error: {e}")
+        finally:
+            loop.close()
+            sys.exit(0)
 
 # ------------------------------------------------------------------ #
