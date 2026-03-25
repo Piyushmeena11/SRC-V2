@@ -761,13 +761,11 @@ class SmartTelegramBot:
                         # Cleanup
                         if file_path:
                             await self.file_ops._cleanup_file(file_path)
-                        current_task = asyncio.current_task()
-                        if current_task in self.active_uploads[sender]:
-                            self.active_uploads[sender].remove(current_task)
                         gc.collect()
 
-            task = asyncio.create_task(upload_task())
-            self.active_uploads[sender].append(task)
+            # Run upload directly (not as background task) so batch loop waits
+            # for full download+upload before moving to next message
+            await upload_task()
             slot_released = True
                     
         except Exception as e:
