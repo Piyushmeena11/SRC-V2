@@ -710,6 +710,9 @@ class SmartTelegramBot:
                             await self.upload_with_pyrogram(file_path, sender, target_chat_id, caption, topic_id, edit_msg)
                     except Exception as e:
                         print(f"Upload error: {e}")
+                        from devgagan.core.func import failed_messages_cache
+                        if sender in failed_messages_cache:
+                            failed_messages_cache[sender].append(getattr(msg, "link", getattr(msg, "id", "Unknown ID")))
                         try:
                             await edit_msg.edit(f"**Error:** {str(e)}")
                         except:
@@ -730,6 +733,9 @@ class SmartTelegramBot:
                     
         except Exception as e:
             print(f"Error in _process_message: {e}")
+            from devgagan.core.func import failed_messages_cache
+            if sender in failed_messages_cache:
+                failed_messages_cache[sender].append(getattr(msg, "link", getattr(msg, "id", "Unknown ID")))
             try:
                 await edit_msg.edit(f"**Error:** {str(e)}")
             except:
