@@ -360,6 +360,12 @@ async def batch_link(_, message):
                 pin_msg = await app.send_message(user_id, f"Starting topic batch from cache ⚡\nTotal valid: {len(cached_msg_ids)}\n\n**Powered by Team SPY**", reply_markup=keyboard)
                 saved_msg_ids = cached_msg_ids
             else:
+                if not userbot:
+                    await app.send_message(user_id, "❌ Userbot not available. Cannot fetch topic messages. Please /login first.")
+                    await delete_batch_state(user_id)
+                    users_loop[user_id] = False
+                    return
+                    
                 pin_msg = await app.send_message(user_id, f"Fetching topic messages in slots ⚡\nTotal messages to check: {total_to_check}\n\n**Powered by Team SPY**", reply_markup=keyboard)
                 valid_msg_ids = []
                 chunk_size = 100
@@ -371,7 +377,7 @@ async def batch_link(_, message):
                     try:
                         msgs = await userbot.get_messages(chat_id, chunk_ids)
                         for msg in msgs:
-                            if msg and getattr(msg, 'message_thread_id', None) == topic_id:
+                            if msg and not msg.empty and getattr(msg, 'message_thread_id', None) == topic_id:
                                 if msg.media or msg.text:
                                     valid_msg_ids.append(msg.id)
                         
@@ -381,12 +387,15 @@ async def batch_link(_, message):
                     except FloodWait as fw:
                         await pin_msg.edit(f"Floodwait of {fw.value} seconds during fetching. Sleeping...")
                         await asyncio.sleep(fw.value + 5)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[Batch] Fetch error chunk {i}: {e}")
+                        await pin_msg.edit(f"⚠️ Error fetching chunk {i}: {str(e)[:100]}")
+                        await asyncio.sleep(3)
                 
                 await db.set_topic_msg_ids(user_id, chat_id, topic_id, valid_msg_ids)
                 await pin_msg.edit(f"✅ Fetching complete!\nTotal valid messages found: {len(valid_msg_ids)}\nStarting processing...\n\n**Powered by Team SPY**", reply_markup=keyboard)
                 saved_msg_ids = valid_msg_ids
+
                 
             for idx, msg_id in enumerate(saved_msg_ids):
                 if not users_loop.get(user_id):
