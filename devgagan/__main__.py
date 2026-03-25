@@ -117,8 +117,5 @@ if __name__ == "__main__":
             loop.run_until_complete(loop.shutdown_asyncgens())
         except Exception as e:
             print(f"Task cleanup error: {e}")
-        finally:
-            loop.close()
-            sys.exit(0)
 
 # ------------------------------------------------------------------ #
