@@ -399,7 +399,7 @@ async def batch_link(_, message):
 
                 try:
                     current_msg = await userbot.get_messages(chat_id, msg_id)
-                    if current_msg:
+                    if current_msg and not current_msg.empty and not current_msg.service:
                         edit_msg = await app.send_message(user_id, f"Processing message {current_msg.id}...")
                         await telegram_bot._process_message(userbot, current_msg, user_id, edit_msg)
                         processed_count += 1
@@ -416,8 +416,12 @@ async def batch_link(_, message):
                 except FloodWait as fw:
                     await pin_msg.edit(f"Floodwait of {fw.value} seconds. Sleeping...")
                     await asyncio.sleep(fw.value + 5)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[Batch] Error processing msg {msg_id}: {e}")
+                    from devgagan.core.func import failed_messages_cache
+                    if user_id in failed_messages_cache:
+                        failed_messages_cache[user_id].append(msg_id)
+                    await asyncio.sleep(2)
                     
             from devgagan.modules.main import telegram_bot
             from devgagan.core.func import failed_messages_cache
