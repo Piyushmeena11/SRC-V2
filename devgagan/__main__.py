@@ -80,6 +80,16 @@ async def devggn_boot():
     
     # This block executes fully ONLY on graceful shutdown (like Heroku restart/SIGTERM)
     await update_bot_status("normal")
+    
+    try:
+        from devgagan import app, userrbot, pro, sex, telethon_client
+        if app and getattr(app, 'is_connected', False): await app.stop()
+        if userrbot and getattr(userrbot, 'is_connected', False): await userrbot.stop()
+        if pro and getattr(pro, 'is_connected', False): await pro.stop()
+        if sex and getattr(sex, 'is_connected', lambda: False)(): await sex.disconnect()
+        if telethon_client and getattr(telethon_client, 'is_connected', lambda: False)(): await telethon_client.disconnect()
+    except Exception as e:
+        print(f"Error during shutdown: {e}")
 
 
 if __name__ == "__main__":
