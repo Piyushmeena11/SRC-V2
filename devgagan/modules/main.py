@@ -350,7 +350,7 @@ async def batch_link(_, message):
     }
     await save_batch_state(user_id, batch_state)
 
-    if topic_id:
+    if is_private and chat_id:
         # Topic batch logic (original proven approach)
         try:
             pin_msg = await app.send_message(user_id, f"Topic batch process started ⚡\nTotal messages to check: {total_to_check}\n\n**Powered by Team SPY**", reply_markup=keyboard)
