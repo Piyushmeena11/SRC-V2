@@ -42,8 +42,6 @@ if STRING:
 else:
     pro = None
 
-from devgagan.core.upload_manager import upload_manager
-
 # Constants and Configuration
 @dataclass
 class BotConfig:
@@ -357,7 +355,6 @@ class SmartTelegramBot:
         self.pending_photos: Set[int] = set()
         self.user_rename_prefs: Dict[str, str] = {}
         self.user_caption_prefs: Dict[str, str] = {}
-        self.active_uploads = defaultdict(list)
         
         # Pro userbot reference
         self.pro_client = pro
@@ -622,7 +619,6 @@ class SmartTelegramBot:
     async def _process_message(self, userbot, msg: Message, sender: int, edit_msg: Message):
         """Processes a fetched message object for downloading and uploading."""
         file_path = None
-        slot_released = True # Default true until we wait_for_slot
         try:
             # Get target chat configuration
             target_chat_str = self.db.get_user_data(sender, "target_chat", str(sender))
@@ -641,84 +637,19 @@ class SmartTelegramBot:
                 await edit_msg.delete()
                 return
             
-            filename, raw_file_size, media_type = self.media_processor.get_media_info(msg)
-            file_size = raw_file_size or 0
-            
-            # Pre-emptively pause downloading if storage queue limit is hit
-            await upload_manager.wait_for_slot(file_size)
-            slot_released = False
+            filename, file_size, media_type = self.media_processor.get_media_info(msg)
             
             # Handle direct media types (voice, video_note, sticker)
-            if await self._handle_direct_media(msg, target_chat_id, topic_id, edit_msg.id, media_type, sender):
-                await upload_manager.release_slot(file_size)
-                slot_released = True
+            if await self._handle_direct_media(msg, target_chat_id, topic_id, edit_msg.id, media_type):
                 return
             
             # Download file
-            try:
-                await edit_msg.edit("**📥 Downloading...**")
-            except FloodWait as fw:
-                await asyncio.sleep(fw.value)
-                await edit_msg.edit("**📥 Downloading...**")
-            except:
-                pass
+            await edit_msg.edit("**📥 Downloading...**")
             
-            file_path = None
-            max_retries = 3
-            error_msg = ""
-            
-            for attempt in range(max_retries):
-                try:
-                    progress_args = ("╭──────────────╮\n│ **__Downloading...__**\n├────────", edit_msg, time.time())
-                    file_path = await userbot.download_media(
-                        msg, file_name=filename, progress=progress_bar, progress_args=progress_args
-                    )
-                    
-                    if file_path and os.path.exists(file_path):
-                        down_size = os.path.getsize(file_path)
-                        if file_size > 0 and down_size != file_size:
-                            raise ValueError(f"Integrity check failed: Expected {file_size} bytes, got {down_size} bytes.")
-                        break  # Success
-                    else:
-                        raise FileNotFoundError("File not downloaded successfully.")
-                        
-                except FloodWait as fw:
-                    error_msg = f"FloodWait {fw.value}s"
-                    try:
-                        await edit_msg.edit(f"**⏳ Telegram rate limit. Waiting {fw.value}s...**")
-                    except:
-                        pass
-                    await asyncio.sleep(fw.value)
-                    # FloodWait doesn't count as an attempt
-                    if attempt < max_retries - 1:
-                        continue
-                    else:
-                        await upload_manager.release_slot(file_size)
-                        slot_released = True
-                        raise Exception(f"Failed after {max_retries} attempts due to FloodWait.")
-                except Exception as e:
-                    error_msg = str(e)
-                    if "Force stop" in error_msg:
-                        await upload_manager.release_slot(file_size)
-                        slot_released = True
-                        raise e
-                        
-                    if file_path and os.path.exists(file_path):
-                        try:
-                            os.remove(file_path)
-                        except:
-                            pass
-                    
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(5)
-                        try:
-                            await edit_msg.edit(f"**⚠️ Download Failed (Attempt {attempt+1}/{max_retries}). Retrying in 5s...**")
-                        except:
-                            pass
-                    else:
-                        await upload_manager.release_slot(file_size)
-                        slot_released = True
-                        raise Exception(f"Failed to download after {max_retries} attempts. Last error: {error_msg}")
+            progress_args = ("╭──────────────╮\n│ **__Downloading...__**\n├────────", edit_msg, time.time())
+            file_path = await userbot.download_media(
+                msg, file_name=filename, progress=progress_bar, progress_args=progress_args
+            )
             
             # Process caption and filename
             caption = await self.process_user_caption(msg.caption.markdown if msg.caption else "", sender)
@@ -731,68 +662,53 @@ class SmartTelegramBot:
                 await edit_msg.delete()
                 if file_path:
                     await self.file_ops._cleanup_file(file_path)
-                await upload_manager.release_slot(file_size)
-                slot_released = True
                 return
             
             # Check file size and handle accordingly
             upload_method = self.db.get_user_data(sender, "upload_method", "Pyrogram")
             
             async def upload_task():
-                async with upload_manager.semaphore:
-                    try:
-                        if file_size > self.config.SIZE_LIMIT:
-                            free_check = 0
-                            if 'chk_user' in globals():
-                                free_check = await chk_user(msg.chat.id, sender)
-                            
-                            if free_check == 1 or not self.pro_client:
-                                # Split file for free users or when pro client unavailable
-                                await edit_msg.delete()
-                                await self.file_ops.split_large_file(file_path, app, sender, target_chat_id, caption, topic_id)
-                                return
-                            else:
-                                # Use 4GB uploader
-                                await self.handle_large_file_upload(file_path, sender, edit_msg, caption)
-                                return
+                try:
+                    if file_size > self.config.SIZE_LIMIT:
+                        free_check = 0
+                        if 'chk_user' in globals():
+                            free_check = await chk_user(msg.chat.id, sender)
                         
-                        # Regular upload
-                        if upload_method == "Telethon" and gf:
-                            await self.upload_with_telethon(file_path, sender, target_chat_id, caption, topic_id, edit_msg)
+                        if free_check == 1 or not self.pro_client:
+                            # Split file for free users or when pro client unavailable
+                            await edit_msg.delete()
+                            await self.file_ops.split_large_file(file_path, app, sender, target_chat_id, caption, topic_id)
+                            return
                         else:
-                            await self.upload_with_pyrogram(file_path, sender, target_chat_id, caption, topic_id, edit_msg)
-                    except Exception as e:
-                        print(f"Upload error: {e}")
-                        from devgagan.core.func import failed_messages_cache
-                        if sender in failed_messages_cache:
-                            failed_messages_cache[sender].append(getattr(msg, "link", getattr(msg, "id", "Unknown ID")))
-                        try:
-                            await edit_msg.edit(f"**Error:** {str(e)}")
-                        except:
-                            pass
-                    finally:
-                        await upload_manager.release_slot(file_size)
-                        # Cleanup
-                        if file_path:
-                            await self.file_ops._cleanup_file(file_path)
-                        gc.collect()
+                            # Use 4GB uploader
+                            await self.handle_large_file_upload(file_path, sender, edit_msg, caption)
+                            return
+                    
+                    # Regular upload
+                    if upload_method == "Telethon" and gf:
+                        await self.upload_with_telethon(file_path, sender, target_chat_id, caption, topic_id, edit_msg)
+                    else:
+                        await self.upload_with_pyrogram(file_path, sender, target_chat_id, caption, topic_id, edit_msg)
+                except Exception as e:
+                    print(f"Upload error: {e}")
+                    try:
+                        await edit_msg.edit(f"**Error:** {str(e)}")
+                    except:
+                        pass
+                finally:
+                    # Cleanup
+                    if file_path:
+                        await self.file_ops._cleanup_file(file_path)
+                    gc.collect()
 
-            # Run upload directly (not as background task) so batch loop waits
-            # for full download+upload before moving to next message
-            await upload_task()
-            slot_released = True
+            asyncio.create_task(upload_task())
                     
         except Exception as e:
             print(f"Error in _process_message: {e}")
-            from devgagan.core.func import failed_messages_cache
-            if sender in failed_messages_cache:
-                failed_messages_cache[sender].append(getattr(msg, "link", getattr(msg, "id", "Unknown ID")))
             try:
                 await edit_msg.edit(f"**Error:** {str(e)}")
             except:
                 pass
-            if not slot_released and 'file_size' in locals():
-                await upload_manager.release_slot(file_size)
             if file_path:
                 await self.file_ops._cleanup_file(file_path)
             gc.collect()
@@ -883,7 +799,7 @@ class SmartTelegramBot:
             
         return False
 
-    async def _handle_direct_media(self, msg, target_chat_id: int, topic_id: Optional[int], edit_id: int, media_type: str, sender: int = None) -> bool:
+    async def _handle_direct_media(self, msg, target_chat_id: int, topic_id: Optional[int], edit_id: int, media_type: str) -> bool:
         """Handle media that can be sent directly without downloading"""
         result = None
         
@@ -897,8 +813,7 @@ class SmartTelegramBot:
             
             if result:
                 await result.copy(LOG_GROUP)
-                if sender:
-                    await app.delete_messages(sender, edit_id)
+                await app.delete_messages(msg.chat.id, edit_id)
                 return True
                 
         except Exception as e:
@@ -987,65 +902,34 @@ class SmartTelegramBot:
                     return
 
                 # Download and upload media
-                filename, raw_file_size, media_type = self.media_processor.get_media_info(msg)
-                file_size = raw_file_size or 0
-                await upload_manager.wait_for_slot(file_size)
+                final_caption = await self._format_caption_with_custom(msg.caption.markdown if msg.caption else "", sender, custom_caption)
                 
-                try:
-                    final_caption = await self._format_caption_with_custom(msg.caption.markdown if msg.caption else "", sender, custom_caption)
-                    
-                    file_path = None
-                    max_retries = 3
-                    error_msg = ""
-                    for attempt in range(max_retries):
-                        try:
-                            progress_args = ("Downloading...", edit_msg, time.time())
-                            file_path = await userbot.download_media(msg, progress=progress_bar, progress_args=progress_args)
-                            if file_path and os.path.exists(file_path):
-                                down_size = os.path.getsize(file_path)
-                                if file_size > 0 and down_size != file_size:
-                                    raise ValueError(f"Integrity check failed: Expected {file_size} bytes, got {down_size} bytes")
-                                break
-                            else:
-                                raise FileNotFoundError("File not downloaded successfully")
-                        except Exception as e:
-                            error_msg = str(e)
-                            if "Force stop" in error_msg:
-                                raise e
-                            if file_path and os.path.exists(file_path):
-                                try: os.remove(file_path)
-                                except: pass
-                            if attempt < max_retries - 1:
-                                await asyncio.sleep(5)
-                                try: await edit_msg.edit(f"**⚠️ Download Failed (Attempt {attempt+1}/{max_retries}). Retrying...**")
-                                except: pass
-                            else:
-                                raise Exception(f"Failed to download after {max_retries} attempts: {error_msg}")
-                    file_path = await self.file_ops.process_filename(file_path, sender)
+                progress_args = ("Downloading...", edit_msg, time.time())
+                file_path = await userbot.download_media(msg, progress=progress_bar, progress_args=progress_args)
+                file_path = await self.file_ops.process_filename(file_path, sender)
 
-                    async with upload_manager.semaphore:
-                        if media_type == "photo":
-                            result = await app_client.send_photo(target_chat_id, file_path, caption=final_caption, message_thread_id=topic_id)
-                        elif file_size > self.config.SIZE_LIMIT:
-                            free_check = 0
-                            if 'chk_user' in globals():
-                                free_check = await chk_user(chat_id, sender)
-                            
-                            if free_check == 1 or not self.pro_client:
-                                await edit_msg.delete()
-                                await self.file_ops.split_large_file(file_path, app_client, sender, target_chat_id, final_caption, topic_id)
-                                return
-                            else:
-                                await self.handle_large_file_upload(file_path, sender, edit_msg, final_caption)
-                                return
-                        else:
-                            upload_method = self.db.get_user_data(sender, "upload_method", "Pyrogram")
-                            if upload_method == "Telethon":
-                                await self.upload_with_telethon(file_path, sender, target_chat_id, final_caption, topic_id, edit_msg)
-                            else:
-                                await self.upload_with_pyrogram(file_path, sender, target_chat_id, final_caption, topic_id, edit_msg)
-                finally:
-                    await upload_manager.release_slot(file_size)
+                filename, file_size, media_type = self.media_processor.get_media_info(msg)
+
+                if media_type == "photo":
+                    result = await app_client.send_photo(target_chat_id, file_path, caption=final_caption, message_thread_id=topic_id)
+                elif file_size > self.config.SIZE_LIMIT:
+                    free_check = 0
+                    if 'chk_user' in globals():
+                        free_check = await chk_user(chat_id, sender)
+                    
+                    if free_check == 1 or not self.pro_client:
+                        await edit_msg.delete()
+                        await self.file_ops.split_large_file(file_path, app_client, sender, target_chat_id, final_caption, topic_id)
+                        return
+                    else:
+                        await self.handle_large_file_upload(file_path, sender, edit_msg, final_caption)
+                        return
+                else:
+                    upload_method = self.db.get_user_data(sender, "upload_method", "Pyrogram")
+                    if upload_method == "Telethon":
+                        await self.upload_with_telethon(file_path, sender, target_chat_id, final_caption, topic_id, edit_msg)
+                    else:
+                        await self.upload_with_pyrogram(file_path, sender, target_chat_id, final_caption, topic_id, edit_msg)
 
         except Exception as e:
             print(f"Public message copy error: {e}")
