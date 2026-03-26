@@ -22,10 +22,6 @@ import cv2
 from pyrogram.errors import FloodWait, InviteHashInvalid, InviteHashExpired, UserAlreadyParticipant, UserNotParticipant
 from datetime import datetime as dt
 import asyncio, subprocess, re, os, time
-
-force_stop_flags = {}
-failed_messages_cache = {}
-
 async def chk_user(message, user_id):
     user = await premium_users()
     if user_id in user or user_id in OWNER_ID:
@@ -93,8 +89,6 @@ PROGRESS_BAR = """\n
 ╰─────────────────────╯
 """
 async def progress_bar(current, total, ud_type, message, start):
-    if hasattr(message, "chat") and force_stop_flags.get(message.chat.id):
-        raise Exception("Force stop requested")
 
     now = time.time()
     diff = now - start
@@ -238,9 +232,6 @@ async def screenshot(video, duration, sender):
         None  
 last_update_time = time.time()
 async def progress_callback(current, total, progress_message):
-    if hasattr(progress_message, "chat") and force_stop_flags.get(progress_message.chat.id):
-        raise Exception("Force stop requested")
-        
     percent = (current / total) * 100
     global last_update_time
     current_time = time.time()
@@ -264,8 +255,6 @@ async def progress_callback(current, total, progress_message):
 
         last_update_time = current_time
 async def prog_bar(current, total, ud_type, message, start):
-    if hasattr(message, "chat") and force_stop_flags.get(message.chat.id):
-        raise Exception("Force stop requested")
 
     now = time.time()
     diff = now - start
